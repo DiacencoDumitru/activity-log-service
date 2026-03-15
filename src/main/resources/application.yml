@@ -1,0 +1,35 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: activity-log-service
+
+cassandra:
+  contact-points: ${CASSANDRA_CONTACT_POINTS:127.0.0.1}  # comma-separated for multiple nodes
+  port: ${CASSANDRA_PORT:9042}
+  keyspace: ${CASSANDRA_KEYSPACE:activity_logs}
+  datacenter: ${CASSANDRA_DATACENTER:datacenter1}
+  replication-factor: ${CASSANDRA_REPLICATION_FACTOR:1}
+
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: when-authorized
+
+logging:
+  level:
+    root: INFO
+    org.example: INFO
+    com.datastax.oss: WARN
+    com.datastax.oss.driver.internal.core.pool.ChannelPool: ERROR
