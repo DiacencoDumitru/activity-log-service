@@ -1,210 +1,186 @@
 # Activity Log Service
 
-A user activity logging service backed by **Apache Cassandra**. REST API, health checks, environment-based configuration, and Testcontainers-based integration tests.
+Backend-сервис для логирования пользовательской активности на базе **Spring Boot** и **Apache Cassandra**.
 
----
+Проект сфокусирован на production-приближенных аспектах для single-service приложения:
 
-## How to Run
+- API-first REST интерфейс с OpenAPI/Swagger
+- устойчивое подключение к Cassandra с retry при старте
+- автоматическая инициализация keyspace/table/index
+- health-check через Spring Actuator с проверкой Cassandra
+- интеграционные тесты через Testcontainers
 
-The application **requires a running Cassandra instance**. If you see `Could not reach any contact point` or `Failed to connect to Cassandra`, start Cassandra first (Step 1 below). You do not need to install Cassandra on your OS—Docker is enough.
+## Highlights
 
-### Requirements
+- Spring Boot 3.2 + Java 17
+- Cassandra-модель с оптимизацией под запросы по `user_id` и времени
+- TTL на каждую запись (дефолт 30 дней, можно переопределить через API)
+- Подготовленные CQL statements и кастомный repository-слой
+- Централизованная обработка ошибок в REST API
 
-- **Java 17+**
-- **Maven 3.8+**
-- **Docker and Docker Compose** (for Cassandra and integration tests)
+## Architecture
 
-### 1. Start Cassandra (Docker Compose)
-
-Three-node cluster (one node exposed on `localhost:9042`):
-
-```bash
-docker-compose up -d
+```mermaid
+flowchart LR
+    Client["Client"] --> Api["REST API (Spring Boot)"]
+    Api --> Service["ActivityLogService"]
+    Service --> Repository["ActivityLogRepository"]
+    Repository --> SessionManager["CassandraSessionManager"]
+    SessionManager --> Cassandra["Apache Cassandra Cluster"]
+    Api --> Actuator["Actuator Health Endpoint"]
+    Actuator --> Cassandra
 ```
 
-Wait for the cluster to be ready. A **three-node cluster often needs 2–3 minutes** before the CQL port accepts connections. To verify:
+### Как это работает
+
+- Клиент отправляет запросы в REST-контроллер `ActivityLogController`.
+- `ActivityLogService` валидирует/дополняет данные (например, ставит `timestamp=now`, если не передан).
+- `ActivityLogRepository` выполняет CQL-запросы через prepared statements.
+- `CassandraSessionManager` поднимает сессию, ретраит коннект и создает схему при старте.
+
+## Engineering Notes
+
+- Защита от нестабильного старта Cassandra: до 15 попыток подключения с задержкой.
+- Хранение временных рядов по пользователю:
+  - partition key: `user_id`
+  - clustering keys: `timestamp DESC`, `activity_id ASC`
+- Поддержка выборок:
+  - все события пользователя
+  - последние `N` событий
+  - события в диапазоне времени
+- Поддержка пользовательского TTL (`ttlSeconds`) при записи.
+
+## Tech Stack
+
+- **Backend:** Java 17, Spring Boot 3.2, Spring Web, Spring Validation
+- **Data:** Apache Cassandra 4.1, DataStax Java Driver 4.1
+- **Docs:** Springdoc OpenAPI (Swagger UI)
+- **Observability:** Spring Boot Actuator (кастомный Cassandra health indicator)
+- **Tests:** JUnit 5, Spring Boot Test, Testcontainers (Cassandra)
+- **Build:** Maven
+
+## Quick Start
+
+### Prerequisites
+
+- Java 17+
+- Maven 3.8+
+- Docker + Docker Compose
+
+### 1) Запуск Cassandra
 
 ```bash
-docker-compose exec cassandra-node1 nodetool status
+docker compose up -d
 ```
 
-All nodes should show status `UN` (Up Normal). Only then start the application.
+В `docker-compose.yml` поднимается 3-node Cassandra cluster, при этом контактная точка для приложения — `localhost:9042`.
 
-### 2. Run the Application
+Проверьте готовность:
+
+```bash
+docker compose exec cassandra-node1 nodetool status
+```
+
+Ожидаемое состояние: у всех нод статус `UN`.
+
+### 2) Запуск приложения
 
 ```bash
 mvn spring-boot:run
 ```
 
-The service will be available at **http://localhost:8080**
+Сервис будет доступен на `http://localhost:8080`.
 
-### 3. Environment Variables (optional)
+### 3) Переменные окружения (опционально)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `CASSANDRA_CONTACT_POINTS` | Cassandra hosts (comma-separated) | `127.0.0.1` |
+| `CASSANDRA_CONTACT_POINTS` | Cassandra contact points (через запятую) | `127.0.0.1` |
 | `CASSANDRA_PORT` | CQL port | `9042` |
-| `CASSANDRA_KEYSPACE` | Keyspace name | `activity_logs` |
-| `CASSANDRA_DATACENTER` | Datacenter name | `datacenter1` |
+| `CASSANDRA_KEYSPACE` | Keyspace | `activity_logs` |
+| `CASSANDRA_DATACENTER` | Datacenter | `datacenter1` |
 | `CASSANDRA_REPLICATION_FACTOR` | Replication factor | `1` |
 
-Example for a custom cluster:
+Пример:
 
 ```bash
-export CASSANDRA_CONTACT_POINTS=host1,host2,host3
+export CASSANDRA_CONTACT_POINTS=127.0.0.1
 export CASSANDRA_PORT=9042
 mvn spring-boot:run
 ```
 
-### 4. Build JAR and Run
+## API
+
+- Swagger UI: `http://localhost:8080/swagger-ui.html`
+- OpenAPI JSON: `http://localhost:8080/api-docs`
+
+### Key Endpoints
+
+- `POST /api/v1/activities` — создать запись активности (body: `userId`, `activityType`, опционально `timestamp`; query: `ttlSeconds`)
+- `GET /api/v1/activities/users/{userId}` — получить все активности пользователя
+- `GET /api/v1/activities/users/{userId}/recent?limit=10` — получить последние активности пользователя
+- `GET /api/v1/activities/users/{userId}/range?startTime=...&endTime=...` — получить активности в диапазоне времени
+- `GET /actuator/health` — health-check приложения и Cassandra
+
+### Примеры запросов
 
 ```bash
-mvn clean package -DskipTests
-java -jar target/activity-log-service-1.0-SNAPSHOT.jar
+curl -X POST http://localhost:8080/api/v1/activities \
+  -H "Content-Type: application/json" \
+  -d '{"userId":"550e8400-e29b-41d4-a716-446655440000","activityType":"login"}'
+
+curl "http://localhost:8080/api/v1/activities/users/550e8400-e29b-41d4-a716-446655440000"
+
+curl "http://localhost:8080/api/v1/activities/users/550e8400-e29b-41d4-a716-446655440000/recent?limit=5"
 ```
 
-### 5. Run Integration Tests
+## Data Model (Cassandra)
 
-Docker must be running (Testcontainers starts Cassandra in a container):
+- Keyspace: `activity_logs`
+- Table: `user_activities`
+- Columns:
+  - `user_id UUID`
+  - `activity_id UUID`
+  - `activity_type TEXT`
+  - `timestamp TIMESTAMP`
+- Primary key:
+  - partition: `user_id`
+  - clustering: `timestamp`, `activity_id`
+- Clustering order: `timestamp DESC`, `activity_id ASC`
+- Secondary index: `idx_activity_type` on `activity_type`
+
+## Testing
+
+Проект использует интеграционные тесты с реальной Cassandra через Testcontainers:
 
 ```bash
 mvn test
 ```
 
-### Troubleshooting: "STARTUP: unexpected failure" or "Could not reach any contact point"
+Покрываются базовые сценарии:
 
-- **Wait longer.** After `docker-compose up -d`, wait **2–3 minutes** before running the app. The app will retry connecting up to 15 times (every 3 seconds); if Cassandra is still booting, it may connect on a later attempt.
-- **Confirm Cassandra is up:**  
-  `docker-compose exec cassandra-node1 nodetool status`  
-  All nodes should be `UN`. If you see `UJ` (Joining) or `DN` (Down), wait until they turn `UN`.
-- **Check Cassandra logs:**  
-  `docker-compose logs cassandra-node1`  
-  Look for errors or "Starting native transport" (CQL is ready when this appears).
-- **Single-node for faster startup:** To avoid waiting for a 3-node cluster, you can temporarily use one node: run only `docker run -d -p 9042:9042 cassandra:4.1` and then start the app (contact point stays `127.0.0.1:9042`).
-
----
-
-## API
-
-- **Swagger UI:** http://localhost:8080/swagger-ui.html
-- **OpenAPI JSON:** http://localhost:8080/api-docs
-
-### Main Operations
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/api/v1/activities` | Record an activity (body: `userId`, `activityType`, optional `timestamp`; query: `ttlSeconds`) |
-| `GET` | `/api/v1/activities/users/{userId}` | All activities for a user |
-| `GET` | `/api/v1/activities/users/{userId}/recent?limit=10` | Last N activities |
-| `GET` | `/api/v1/activities/users/{userId}/range?startTime=...&endTime=...` | Activities in a time range (ISO-8601) |
-
-### Examples (curl)
-
-```bash
-# Record an activity
-curl -X POST http://localhost:8080/api/v1/activities \
-  -H "Content-Type: application/json" \
-  -d '{"userId":"550e8400-e29b-41d4-a716-446655440000","activityType":"login"}'
-
-# Get user activities
-curl "http://localhost:8080/api/v1/activities/users/550e8400-e29b-41d4-a716-446655440000"
-
-# Last 5 activities
-curl "http://localhost:8080/api/v1/activities/users/550e8400-e29b-41d4-a716-446655440000/recent?limit=5"
-```
-
-### Health
-
-- **http://localhost:8080/actuator/health** — overall status and Cassandra connectivity check.
-
----
-
-## Architecture
-
-### Components
-
-```
-                    ┌─────────────────────────────────────────────────────────┐
-                    │                     Client (HTTP)                         │
-                    └───────────────────────────┬─────────────────────────────┘
-                                                │
-                    ┌───────────────────────────▼─────────────────────────────┐
-                    │              Spring Boot (REST API, Actuator)            │
-                    │  ┌─────────────┐  ┌──────────────┐  ┌─────────────────┐  │
-                    │  │ Controller  │──│   Service    │──│   Repository    │  │
-                    │  └─────────────┘  └──────────────┘  └────────┬────────┘  │
-                    │         │                    │                      │     │
-                    │  ┌──────▼──────┐      ┌──────▼──────┐    ┌────────▼────┐ │
-                    │  │ DTOs        │      │ Validation  │    │ Cassandra    │ │
-                    │  │ Exception   │      │ (Bean Valid)│    │ Session Mgr  │ │
-                    │  └─────────────┘      └─────────────┘    └──────┬───────┘ │
-                    └─────────────────────────────────────────────────┼─────────┘
-                                                                      │
-                    ┌─────────────────────────────────────────────────▼─────────┐
-                    │              Apache Cassandra (CQL Driver 4.x)             │
-                    │  Keyspace: activity_logs                                   │
-                    │  Table: user_activities (PK: user_id, CK: timestamp, id)   │
-                    └───────────────────────────────────────────────────────────┘
-```
-
-### Data Layer (Cassandra)
-
-- **Partition key:** `user_id` — queries by user hit a single partition (optimal for Cassandra).
-- **Clustering:** `timestamp DESC`, `activity_id` — time-ordered and unique per event.
-- **TTL** is supported on insert (default 30 days; can set `ttlSeconds` via API).
-- Schema (keyspace and table) is created on first application connection.
-
-### Responsibility Split
-
-- **Controller** — HTTP, DTO mapping, delegating to the service.
-- **Service** — business logic, DTO ↔ domain model conversion.
-- **Repository** — CQL, prepared statements, Row → entity mapping.
-- **CassandraSessionManager** — single CQL session, schema init, driver settings (consistency, timeout).
-
----
-
-## Tech Stack
-
-| Category | Technology | Use |
-|----------|------------|-----|
-| **Language / runtime** | Java 17 | Application core |
-| **Framework** | Spring Boot 3.2 | REST, configuration, Actuator |
-| **Database** | Apache Cassandra 4.1 | Activity log storage |
-| **DB driver** | DataStax Java Driver 4.1 | Cassandra connection, prepared statements |
-| **Validation** | Bean Validation (Jakarta) | Input DTOs |
-| **API docs** | Springdoc OpenAPI 2.x | Swagger UI, OpenAPI 3 |
-| **Observability** | Spring Boot Actuator | Health (including custom Cassandra indicator) |
-| **Tests** | JUnit 5, Testcontainers, Spring Boot Test | Integration tests with real Cassandra in Docker |
-| **Build** | Maven | Build, run, tests |
-
----
+- health endpoint (`/actuator/health`)
+- создание activity и чтение по `userId`
+- ограничение на выдачу recent-запроса (`limit`)
 
 ## Project Structure
 
-```
-src/main/java/org/example/
-├── ActivityLogApplication.java      # Spring Boot entry point
-├── config/
-│   ├── CassandraConfig.java         # Beans: session manager, repository
-│   ├── CassandraProperties.java     # application.yml → cassandra.*
-│   └── CassandraHealthIndicator.java # /actuator/health — Cassandra check
-├── model/
-│   └── ActivityLog.java            # Domain entity
-├── repository/
-│   └── ActivityLogRepository.java  # CQL operations (insert, select by user/time)
-├── service/
-│   └── ActivityLogService.java     # Service layer
-├── web/
-│   ├── ActivityLogController.java  # REST API
-│   ├── GlobalExceptionHandler.java # Error and validation handling
-│   └── dto/
-│       ├── ActivityLogRequest.java
-│       └── ActivityLogResponse.java
-└── util/
-    └── CassandraSessionManager.java # Session and schema setup
-```
+- `src/main/java/org/example/ActivityLogApplication.java` — точка входа Spring Boot
+- `src/main/java/org/example/config` — конфиг Cassandra и health indicator
+- `src/main/java/org/example/web` — REST controller, DTO, обработка ошибок
+- `src/main/java/org/example/service` — бизнес-логика
+- `src/main/java/org/example/repository` — CQL операции
+- `src/main/java/org/example/util` — управление Cassandra session и schema init
+- `src/test/java/org/example/ActivityLogApiIntegrationTest.java` — интеграционные тесты API
 
----
+## Troubleshooting
 
-## License
-MIT
+- Ошибка `Could not reach any contact point`:
+  - проверьте, что Cassandra поднята: `docker compose ps`
+  - дождитесь готовности кластера (2-3 минуты после старта)
+  - проверьте статус нод: `docker compose exec cassandra-node1 nodetool status`
+- Если приложение стартовало раньше Cassandra, оно выполнит retry-подключения автоматически.
+
+## Author
+
+Dumitru Diacenco
